@@ -8,9 +8,9 @@ OSCVisuals {
 		nl = [$\\, $\\, $n].as(String);
 	}
 
-	*new { arg hostname, port;
+	*new { arg hostname, port, reset=false;
 		var inst = super.newCopyArgs(NetAddr(hostname, port));
-		inst.send('/layers/reset', 9);
+		if (reset, { inst.send('/layers/reset', 9); });
 		^inst;
 	}
 
