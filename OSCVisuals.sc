@@ -9,7 +9,9 @@ OSCVisuals {
 	}
 
 	*new { arg hostname, port;
-		^super.newCopyArgs(NetAddr(hostname, port));
+		var inst = super.newCopyArgs(NetAddr(hostname, port));
+		inst.send('/layers/reset', 9);
+		^inst;
 	}
 
 	send { |...args|
