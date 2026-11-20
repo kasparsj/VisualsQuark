@@ -45,7 +45,7 @@ OSCVisualsReplay {
 
 	*initClass {
 		allowedAddresses = ["/layers/reset", "/input", "/input/set", "/var", "/shader", "/shader/var", "/tex",
-			"/shader/texture", "/tex/size", "/tex/speed", "/tex/set", "/shader/texture/size",
+			"/shader/texture", "/tex/var", "/tex/size", "/tex/speed", "/tex/set", "/shader/texture/size",
 			"/shader/texture/speed", "/shader/texture/set", "/layer/pos", "/layer/rot", "/layer/scale",
 			"/layer/pivot", "/layer/size", "/layer/tint", "/layer/alpha", "/layer/bri", "/layer/speed",
 			"/layer/visible", "/layer/align", "/layer/blend"];
@@ -111,7 +111,7 @@ OSCVisualsReplay {
 		if(vectorAddresses.includesEqual(address) and: { args.size == 2 and: { args[1].class === Array } }) {
 			args = [args[0]] ++ args[1]
 		};
-		if(address == "/shader/var" and: { args.size == 3 and: { args[2].class === Array } }) {
+		if(["/shader/var", "/tex/var"].includesEqual(address) and: { args.size == 3 and: { args[2].class === Array } }) {
 			args = [args[0], args[1]] ++ args[2]
 		};
 		if(args.any { |value| value.class === Array }) { this.fail("Array is only supported at a known vector position") };
@@ -138,6 +138,8 @@ OSCVisualsReplay {
 		var strictShaders = Set.new, strictDefaults = Set.new, strictSamplers = Set.new, strictAssets = Dictionary.new;
 		var strictBindings, strictPhase = 0, strictComponents = 0, strictFragmentBytes = 0, strictImageBytes = 0;
 		var strictExpr, strictNumber, strictAsset;
+		var feedbackLayer, feedbackSettings = Dictionary.new, feedbackSize = false, feedbackSpeed = false, feedbackControls = Set.new;
+		var feedbackReserved = ["size", "speed", "color", "tint", "timePct", "time", "resolution", "srctex", "randomSeed", "random", "mouse", "frame", "modelViewProjectionMatrix", "modelViewMatrix", "projectionMatrix", "textureMatrix", "globalColor", "usingTexture", "usingColors"].asSet;
 
 		if(replyPort.isInteger.not or: { replyPort < 1024 or: { replyPort > 65535 } }) { this.fail("reply port outside 1024..65535") };
 		if(commands.size < 1 or: { commands.size > 2048 }) { this.fail("command count outside 1..2048") };
@@ -145,7 +147,7 @@ OSCVisualsReplay {
 			if(this.strictString(name, false).not or: { name.beginsWith("assets/").not or: { name.includes($\\) } }) { this.fail("unsafe asset path") };
 			parts = name.split($/);
 			if(parts.size < 2 or: { parts.any { |part| part.size == 0 or: { part == "." or: { part == ".." } } } }) { this.fail("unsafe asset components") };
-			if((kind == \fragment and: { name.endsWith(".frag").not }) or: { kind == \image and: { name.endsWith(".png").not } }) { this.fail("asset suffix does not match command") };
+			if(([\fragment, \feedback_fragment].includes(kind) and: { name.endsWith(".frag").not }) or: { kind == \image and: { name.endsWith(".png").not } }) { this.fail("asset suffix does not match command") };
 			known = strictAssets.at(name);
 			if(known.notNil and: { known != kind }) { this.fail("asset used with conflicting kinds") };
 			if(known.isNil) {
@@ -153,7 +155,7 @@ OSCVisualsReplay {
 				if(File.type(path) != \regular) { this.fail("asset is missing or not a regular file: " ++ name) };
 				size = File.fileSize(path);
 				if(size.isInteger.not or: { size < 0 }) { this.fail("cannot size asset: " ++ name) };
-				if(kind == \fragment) {
+				if([\fragment, \feedback_fragment].includes(kind)) {
 					if(size > 131072) { this.fail("fragment asset exceeds 131072 bytes") };
 					strictFragmentBytes = strictFragmentBytes + size
 				} { strictImageBytes = strictImageBytes + size };
@@ -219,7 +221,33 @@ OSCVisualsReplay {
 					if(args.size < 1 or: { this.strictInt(args[0]).not or: { args[0] < 0 or: { args[0] >= layerCount } } }) { this.fail("invalid layer index") };
 					layer = args[0]; tail = args.drop(1); binding = nil;
 					if(address == "/shader") { if(tail.size != 1 or: { strictShaders.includesEqual(layer) }) { this.fail("invalid or duplicate shader source") }; strictAsset.(tail[0], \fragment); strictShaders.add(layer) };
-					if(address == "/tex") { if(tail.size != 1 or: { strictDefaults.includesEqual(layer) }) { this.fail("invalid or duplicate default image") }; strictAsset.(tail[0], \image); strictDefaults.add(layer) };
+					if(address == "/tex") {
+						if(tail.size != 1 or: { strictDefaults.includesEqual(layer) or: { tail[0].isString.not } }) { this.fail("invalid or duplicate default source") };
+						if(tail[0].beginsWith("shader_pp:")) {
+							if(feedbackLayer.notNil) { this.fail("only one feedback source is supported") };
+							strictAsset.(tail[0].copyToEnd(10), \feedback_fragment); feedbackLayer = layer;
+						} { strictAsset.(tail[0], \image) }; strictDefaults.add(layer)
+					};
+					if(address == "/tex/var") {
+						if(layer != feedbackLayer or: { tail.size < 2 or: { tail.size > 5 } } or: { strictIdentifier.(tail[0]).not or: { feedbackReserved.includesEqual(tail[0]) or: { tail[0].beginsWith("gl_") } } }) { this.fail("invalid feedback control") };
+						if(tail.drop(1).every { |value| this.strictFloat(value) }.not) { this.fail("feedback controls require constant float components") };
+						if(feedbackControls.includesEqual(tail[0])) { this.fail("duplicate feedback control") };
+						feedbackControls.add(tail[0]); if(feedbackControls.size > 64) { this.fail("too many feedback controls") };
+						strictComponents = strictComponents + tail.size - 1; binding = "feedback:" ++ tail[0];
+					};
+					if(address.beginsWith("/tex/") and: { layer == feedbackLayer }) {
+						if(address == "/tex/size") {
+							if(feedbackSize or: { tail.size != 2 } or: { tail.every { |value| this.strictFloat(value) and: { value == value.floor } }.not } or: { tail[0] < 1 or: { tail[0] > 800 or: { tail[1] < 1 or: { tail[1] > 600 } } } }) { this.fail("invalid feedback dimensions") }; feedbackSize = true;
+						};
+						if(address == "/tex/speed") { if(tail.size != 1 or: { this.strictFloat(tail[0]).not or: { tail[0] != 1.0 or: { feedbackSpeed } } }) { this.fail("feedback speed must be constant 1") }; feedbackSpeed = true };
+						if(address == "/tex/set") {
+							if(tail.size != 2 or: { tail[0].isString.not or: { this.strictInt(tail[1]).not } }) { this.fail("invalid feedback setting") };
+							if(feedbackSettings.includesKey(tail[0])) { this.fail("duplicate feedback setting") };
+							if((Dictionary["internalformat" -> [32856], "textureTarget" -> [3553], "blendMode" -> [0], "aspectRatio" -> [1], "static" -> [0, 1], "noClear" -> [0], "filter" -> [9729], "minFilter" -> [9729], "magFilter" -> [9729]]).at(tail[0]).isNil) { this.fail("unsupported feedback setting") };
+							if((Dictionary["internalformat" -> [32856], "textureTarget" -> [3553], "blendMode" -> [0], "aspectRatio" -> [1], "static" -> [0, 1], "noClear" -> [0], "filter" -> [9729], "minFilter" -> [9729], "magFilter" -> [9729]]).at(tail[0]).includes(tail[1]).not) { this.fail("invalid feedback storage value") };
+							feedbackSettings.put(tail[0], tail[1]);
+						};
+					};
 					if(address == "/shader/var") {
 						if(tail.size < 2 or: { tail.size > 5 or: { strictIdentifier.(tail[0]).not or: { strictReserved.includesEqual(tail[0]) } } }) { this.fail("invalid shader uniform") };
 						kinds = Set.new;
@@ -244,6 +272,11 @@ OSCVisualsReplay {
 			if(strictComponents > 1024) { this.fail("recipe exceeds 1024 scalar components") };
 		};
 
+		if(feedbackLayer.notNil) {
+			if(feedbackSettings.includesKey("filter") and: { feedbackSettings.includesKey("minFilter") or: { feedbackSettings.includesKey("magFilter") } }) { this.fail("feedback filter settings overlap") };
+			if(feedbackSize.not or: { feedbackSpeed.not } or: { (feedbackSettings.at("filter") == 9729 or: { feedbackSettings.at("minFilter") == 9729 and: { feedbackSettings.at("magFilter") == 9729 } }).not } or: { ["internalformat", "textureTarget", "blendMode", "aspectRatio", "static"].every { |key| feedbackSettings.includesKey(key) }.not }) { this.fail("incomplete feedback setup") };
+		};
+
 		// Preserve the original independent structural pass as a second fail-closed check.
 		layerCount = -1; inputs = Set.new; shaders = Set.new; defaults = Set.new; samplers = Set.new;
 		commands.do { |cmd, i|
@@ -259,11 +292,12 @@ OSCVisualsReplay {
 						if(address == "/tex") { ok = (tail.size == 1) and: { tail[0].isString }; if(ok) { defaults.add(layer) } };
 						if(address == "/shader/var") { ok = shaders.includes(layer) and: { tail.size >= 2 and: { tail.size <= 5 } } and: { tail[0].isString } and: { tail.drop(1).every { |value| value.isString or: { value.isFloat or: { value.isInteger } } } } };
 						if(address == "/shader/texture") { ok = shaders.includes(layer) and: { tail.size == 2 } and: { tail[0].isString and: { tail[1].isString } }; if(ok) { key = layer.asString ++ ":" ++ tail[0]; ok = samplers.includes(key).not; samplers.add(key) } };
+						if(address == "/tex/var") { ok = (layer == feedbackLayer) };
 						if(["/tex/size", "/tex/speed", "/tex/set"].includesEqual(address)) { ok = defaults.includes(layer) };
 						if(address.beginsWith("/shader/texture/")) { key = layer.asString ++ ":" ++ tail[0]; ok = (tail.size > 0) and: { tail[0].isString } and: { samplers.includesEqual(key) }; tail = tail.drop(1) };
 						if(ok and: { address.endsWith("/size") }) { ok = (tail.size == 2) and: { tail.every { |value| value.isFloat and: { value > 0 and: { value <= 2048 } } } } };
 						if(ok and: { address.endsWith("/speed") }) { ok = (tail.size == 1) and: { isNumber.(tail[0]) } };
-						if(ok and: { address.endsWith("/set") }) { ok = (tail.size == 2) and: { tail[0].isString } and: { tail[1].isInteger } and: { ((["aspectRatio", "static"].includesEqual(tail[0])) and: { [0, 1].includes(tail[1]) }) or: { (tail[0] == "blendMode") and: { tail[1] >= 0 and: { tail[1] <= 5 } } } } };
+						if(ok and: { address.endsWith("/set") } and: { (address != "/tex/set") or: { layer != feedbackLayer } }) { ok = (tail.size == 2) and: { tail[0].isString } and: { tail[1].isInteger } and: { ((["aspectRatio", "static"].includesEqual(tail[0])) and: { [0, 1].includes(tail[1]) }) or: { (tail[0] == "blendMode") and: { tail[1] >= 0 and: { tail[1] <= 5 } } } } };
 						if(["/layer/pos", "/layer/rot", "/layer/scale", "/layer/pivot", "/layer/size"].includesEqual(address)) { ok = (tail.size == 3) and: { tail.every(isNumber) } };
 						if(address == "/layer/tint") { ok = (tail.size == 4) and: { tail.every(isNumber) } };
 						if(["/layer/alpha", "/layer/bri", "/layer/speed"].includesEqual(address)) { ok = (tail.size == 1) and: { isNumber.(tail[0]) } };
@@ -283,7 +317,11 @@ OSCVisualsReplay {
 		token = randomBytes.collect { |byte| byte.bitAnd(255).asHexString(2) }.join;
 		messages = [["/scene/reset", token, replyPort, width, height]] ++ commands.collect { |cmd, i|
 			var args = cmd.copy, address = args.removeAt(0);
-			if(address == "/shader" or: { address == "/tex" }) { args[1] = rendererRoot +/+ args[1] };
+			if(address == "/shader" or: { address == "/tex" }) {
+				args[1] = if(address == "/tex" and: { args[1].beginsWith("shader_pp:") }) {
+					"shader_pp:" ++ (rendererRoot +/+ args[1].copyToEnd(10))
+				} { rendererRoot +/+ args[1] };
+			};
 			if(address == "/shader/texture") { args[2] = rendererRoot +/+ args[2] };
 			["/scene/command", token, i + 1, address] ++ args
 		} ++ [["/scene/replay/end", token, replyPort, commands.size, finalGate]];
