@@ -21,6 +21,10 @@ OSCVisuals {
 		^inst;
 	}
 
+	*sceneFeedbackReplayVersion {
+		^1
+	}
+
 	*sceneReplayVersion {
 		^1
 	}

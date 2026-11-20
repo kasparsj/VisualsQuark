@@ -42,6 +42,28 @@ The replay implementation preserves `send`, `sendRaw`, `prStringify`, `net`, and
 the default constructor's no-reset behavior. It does not install or update the
 Quark automatically and does not change the renderer protocol.
 
+## Feedback scene replay
+
+`OSCVisuals.sceneFeedbackReplayVersion == 1` advertises one default feedback
+texture on the existing replay path. Check this feature before constructing a
+client for generated feedback scenes. Feedback source commands use
+`"shader_pp:assets/feedback.frag"`: preflight checks the plain local asset, then
+reattaches `shader_pp:` to its resolved renderer path. `sceneRoot` and
+`rendererRoot` can differ; no upload is performed.
+
+The source must precede its controls. Supply `/tex/size` as two integral floats
+(width 1..800, height 1..600), `/tex/speed` as `1.0`, and `/tex/set` values
+`internalformat: 32856`, `textureTarget: 3553`, `filter: 9729`, `blendMode: 0`,
+`aspectRatio: 1`, and `static: 0` or `1`. Separate `minFilter` and `magFilter`
+values of 9729 can replace `filter`. Constant scalar or vector feedback controls
+use `/tex/var`; `send` expands an Array in its value position into float OSC
+components. There are at most 64 distinct custom controls. Built-in bindings,
+integer controls, expressions, duplicate controls, incomplete settings, extra
+feedback instances and unsafe or missing assets fail before replay sends packets.
+Native shader compilation and uniform reflection happen after sending and can
+still report a runtime failure. Replay completion keeps the same observer,
+timeout and no-resend semantics described above.
+
 ## Constructor reset
 
 `OSCVisuals(host, port, reset: true)` retains the expanded reset sequence from

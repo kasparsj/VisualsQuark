@@ -367,6 +367,231 @@ SystemClock.sched({exit_delay}, {{
     return {"status": callback_status, "default_timeout": default_timeout, "bundle_sha256": hashlib.sha256(bundles[0]).hexdigest(), "receipt": f"replay-{label}/owned/receipt.json"}
 
 
+def feedback_case(root: Path) -> dict:
+    case = root / "feedback"
+    scene = case / "relocated scene λ"
+    assets = scene / "assets"
+    assets.mkdir(parents=True)
+    (assets / "feedback.frag").write_text("#version 410\nvoid main() {}\n")
+    (assets / "oversize.frag").write_bytes(b"x" * 131073)
+    base = [
+        ["/layers/reset", 2, "stack"],
+        ["/tex", 0, "shader_pp:assets/feedback.frag"],
+        ["/tex/size", 0, 800.0, 600.0],
+        ["/tex/speed", 0, 1.0],
+        *[["/tex/set", 0, name, value] for name, value in [
+            ("internalformat", 32856), ("textureTarget", 3553), ("filter", 9729),
+            ("blendMode", 0), ("aspectRatio", 1), ("static", 1)]],
+        ["/tex/var", 0, "decay", 0.5],
+        ["/tex/var", 0, "offset", 1.0, 2.0, 3.0, 4.0],
+    ]
+    def sc_value(value):
+        return json.dumps(value, ensure_ascii=False)
+    def replay(commands, *, renderer="/renderer distinct λ", local=None):
+        lines = "\n".join("r.sendRaw(" + ", ".join(sc_value(x) for x in cmd) + ");" for cmd in commands)
+        return f'v.replay({{ |r| {lines} }}, {sc_value(str(scene) if local is None else local)}, 800, 600, rendererRoot: {sc_value(renderer)}, replyTimeout: 0.1)'
+    negatives = []
+    labels = []
+    def reject(label, commands, **settings):
+        labels.append(label)
+        negatives.append('try { ' + replay(commands, **settings) + ' } { |error| caught = caught + 1; ["FEEDBACK_REJECT", ' + sc_value(label) + ', error.errorString].postln }; v.sendRaw("/after-rejection", ' + sc_value(label) + ');')
+    for index, label in [(2, "missing size"), (3, "missing speed"), (4, "missing format"), (5, "missing target"), (6, "missing filter"), (7, "missing blend"), (8, "missing aspect"), (9, "missing static")]:
+        reject(label, base[:index] + base[index+1:])
+    for label, cmd in [
+        ("fractional width", ["/tex/size", 0, 799.5, 600.0]),
+        ("integer size tags", ["/tex/size", 0, 800, 600]),
+        ("over width", ["/tex/size", 0, 801.0, 600.0]),
+        ("over height", ["/tex/size", 0, 800.0, 601.0]),
+        ("zero", ["/tex/size", 0, 0.0, 600.0]),
+    ]:
+        reject(label, base[:2] + [cmd] + base[3:])
+    for label, source in [("missing", "shader_pp:assets/missing.frag"), ("traversal", "shader_pp:assets/../feedback.frag"), ("prefix", "shader:assets/feedback.frag"), ("double prefix", "shader_pp:shader_pp:assets/feedback.frag"), ("oversize", "shader_pp:assets/oversize.frag")]:
+        reject(label, base[:1] + [["/tex", 0, source]] + base[2:])
+    reject("second feedback", base + [["/tex", 1, "shader_pp:assets/feedback.frag"]])
+    reject("control int", base + [["/tex/var", 0, "bad", 1]])
+    reject("control expression", base + [["/tex/var", 0, "bad", "sin(t)"]])
+    reject("control builtin", base + [["/tex/var", 0, "time", 1.0]])
+    reject("control duplicate", base + [["/tex/var", 0, "decay", 1.0]])
+    reject("control count", base + [["/tex/var", 0, f"c{i}", 1.0] for i in range(65)])
+    reject("unsupported setting", base + [["/tex/set", 0, "numFrames", 2]])
+    reject("filter overlap", base + [["/tex/set", 0, "minFilter", 9729]])
+    for name in ["tint", "randomSeed", "projectionMatrix", "modelViewMatrix", "modelViewProjectionMatrix", "textureMatrix", "globalColor", "usingTexture", "usingColors"]:
+        reject("builtin " + name, base + [["/tex/var", 0, name, 1.0]])
+    reject("wrong storage", base[:4] + [["/tex/set", 0, "internalformat", 6408]] + base[5:])
+    reject("wrong speed", base[:3] + [["/tex/speed", 0, "1"]] + base[4:])
+    reject("before source", base[:1] + [base[2], base[1]] + base[3:])
+    for label, source in [("absolute asset", "shader_pp:/tmp/a.frag"), ("empty component", "shader_pp:assets//feedback.frag"), ("dot component", "shader_pp:assets/./feedback.frag"), ("wrong suffix", "shader_pp:assets/feedback.png")]:
+        reject(label, base[:1] + [["/tex", 0, source]] + base[2:])
+    labels.append("nul path")
+    nul_replay = replay(base).replace('"shader_pp:assets/feedback.frag"', '("shader_pp:assets/feedback.frag" ++ String.with(0.asAscii))', 1)
+    negatives.append('try { ' + nul_replay + ' } { |error| caught=caught+1; ["FEEDBACK_REJECT", "nul path", error.errorString].postln }; v.sendRaw("/after-rejection", "nul path");')
+    reject("empty renderer root", base, renderer="")
+    reject("oversize renderer root", base, renderer="/" + "r" * 2048)
+    reject("empty vector", base + [["/tex/var", 0, "empty"]])
+    reject("oversize vector", base + [["/tex/var", 0, "wide", 1.0, 2.0, 3.0, 4.0, 5.0]])
+    reject("gl reserved", base + [["/tex/var", 0, "gl_bad", 1.0]])
+    reject("command bound", base + [["/layer/blend", 0, 0]] * 2048)
+    reject("bundle bound", base + [["/layer/alpha", 0, "sin(t)" + " " * 1000]] * 64)
+    reject("numeric local root", base, local=1)
+    reject("empty local root", base, local="")
+    reject("missing local root", base, local=str(scene / "missing"))
+    reject("numeric renderer root", base, renderer=1)
+    reject("control magnitude", base + [["/tex/var", 0, "large", 1000001.0]])
+    for label, expression in [("control NaN", "(0.0/0.0)"), ("control infinity", "(1.0/0.0)")]:
+        labels.append(label)
+        numeric_replay = replay(base + [["/tex/var", 0, "nonfinite", 0.5]]).replace('"nonfinite", 0.5', '"nonfinite", ' + expression)
+        negatives.append('try { ' + numeric_replay + ' } { |error| caught=caught+1; ["FEEDBACK_REJECT", ' + sc_value(label) + ', error.errorString].postln }; v.sendRaw("/after-rejection", ' + sc_value(label) + ');')
+    (assets / "directory.frag").mkdir()
+    reject("nonregular asset", base[:1] + [["/tex", 0, "shader_pp:assets/directory.frag"]] + base[2:])
+    reject("conflicting asset kind", base + [["/shader", 1, "assets/feedback.frag"]])
+    aggregate = [list(command) for command in base]; aggregate[0] = ["/layers/reset", 32, "stack"]
+    for i in range(1, 10):
+        (assets / f"large-{i}.frag").write_bytes(b"x" * 131072)
+        aggregate.append(["/shader", i, f"assets/large-{i}.frag"])
+    reject("aggregate fragment budget", aggregate)
+    many_assets = [list(command) for command in base] + [["/shader", 1, "assets/other.frag"]]
+    (assets / "other.frag").write_text("#version 410\nvoid main(){}\n")
+    for i in range(65):
+        (assets / f"image-{i}.png").write_bytes(b"metadata-only-image")
+        many_assets.append(["/shader/texture", 1, f"sample{i}", f"assets/image-{i}.png"])
+    reject("aggregate asset count", many_assets)
+    with UDPCollector() as collector:
+        script = f'''(
+var v = OSCVisuals("127.0.0.1", {collector.port}, false), caught = 0;
+if(OSCVisuals.sceneFeedbackReplayVersion != 1) {{ Error("feedback feature mismatch").throw }};
+{chr(10).join(negatives)}
+if(caught != {len(labels)}) {{ Error("feedback rejection count: " ++ caught).throw }};
+{replay(base)};
+v.sendRaw("/after-feedback", 7);
+SystemClock.sched(0.3, {{ "FEEDBACK_CASE_OK".postln; 0.exit; nil }});
+)'''
+        receipt = run_sclang(case / "owned", script)
+        time.sleep(0.1)
+    bundles = [packet for packet, _ in collector.packets if packet.startswith(b"#bundle\x00")]
+    if len(bundles) != 1 or "FEEDBACK_CASE_OK" not in receipt["output"]:
+        raise AssertionError(f"feedback preflight leaked or failed: {len(bundles)}\n{receipt['output']}")
+    decoded = decode_packet(bundles[0])
+    commands = [item[2][2:] for item in decoded[1:-1]]
+    expected = [list(cmd) for cmd in base]
+    expected[1][-1] = "shader_pp:/renderer distinct λ/assets/feedback.frag"
+    if commands != expected:
+        raise AssertionError(f"feedback wire mismatch: {commands}")
+    if decoded[-2][1] != ",sisisffff":
+        raise AssertionError(f"feedback vector typetags: {decoded[-2][1]}")
+    ordinary = [decode_packet(packet)[0][:3] for packet, _ in collector.packets if not packet.startswith(b"#bundle\x00")]
+    expected_ordinary = [("/after-rejection", ",s", [label]) for label in labels] + [("/after-feedback", ",i", [7])]
+    if ordinary != expected_ordinary:
+        raise AssertionError(f"same client unusable after feedback preflight: {ordinary}")
+    for label in labels:
+        if receipt["output"].count("[FEEDBACK_REJECT, " + label + ",") != 1:
+            raise AssertionError("missing per-case rejection receipt: " + label)
+    (case / "wire.json").write_text(json.dumps({"commands": commands, "tags": [item[1] for item in decoded], "packet_hex": bundles[0].hex(), "all_packets_hex": [packet.hex() for packet, _ in collector.packets]}, indent=2, ensure_ascii=False) + "\n")
+    return {"rejected": labels, "receipt": "feedback/owned/receipt.json", "wire": "feedback/wire.json"}
+
+
+def feedback_observer_case(root: Path, status: str) -> dict:
+    """Independent injected UDP corpus, including foreign source and late replies."""
+    case = root / f"feedback-observer-{status}"
+    scene = case / "scene"; (scene / "assets").mkdir(parents=True)
+    (scene / "assets/feedback.frag").write_text("#version 410\nvoid main(){}\n")
+    timeout = 15.0 if status == "unknown" else .6
+    exit_delay = 15.5 if status == "unknown" else .9
+    expected_frame = -1 if status != "applied" else 42
+    with UDPCollector() as collector:
+        script = f'''(
+var v=OSCVisuals("127.0.0.1",{collector.port},false), count=0, result, observedFrame, sentinelCount=0;
+var sentinel=OSCFunc({{ sentinelCount=sentinelCount+1 }},'/unrelated',nil);
+var inventory={{ OSCFunc.allFuncProxies.values.sum({{ |items| items.size }}) }};
+var before=inventory.value;
+v.replay({{ |r|
+ r.sendRaw("/layers/reset",1,"stack");r.sendRaw("/tex",0,"shader_pp:assets/feedback.frag");
+ r.sendRaw("/tex/size",0,800.0,600.0);r.sendRaw("/tex/speed",0,1.0);
+ r.sendRaw("/tex/set",0,"internalformat",32856);r.sendRaw("/tex/set",0,"textureTarget",3553);
+ r.sendRaw("/tex/set",0,"filter",9729);r.sendRaw("/tex/set",0,"blendMode",0);
+ r.sendRaw("/tex/set",0,"aspectRatio",1);r.sendRaw("/tex/set",0,"static",1);
+}},"{scene}",800,600,replyTimeout:{timeout},onComplete:{{ |state,frame,detail|
+ count=count+1;result=state;observedFrame=frame;
+ if(frame != {expected_frame}){{Error("wrong completion frame").throw}};
+ if("{status}"=="applied"){{Error("intentional feedback completion error").throw}};
+}});
+SystemClock.sched(0.12,{{if(count!=0){{Error("foreign reply completed replay").throw}};nil}});
+SystemClock.sched({exit_delay},{{
+ if(count!=1 or:{{result.asString!="{status}"}} or:{{observedFrame != {expected_frame}}}){{Error("completion count/status mismatch").throw}};
+ if(inventory.value!=before){{Error("responder inventory leaked").throw}};
+ if(sentinelCount!=2){{Error("unrelated responder not preserved").throw}};
+ v.sendRaw("/after-observer",7);sentinel.free;
+ "FEEDBACK_OBSERVER_OK {status}".postln;0.exit;nil
+}});
+)'''
+        errors=[]; sent=[]; stop=threading.Event()
+        def inject():
+            try:
+                deadline=time.monotonic()+8
+                while not collector.packets:
+                    if time.monotonic()>deadline: raise AssertionError('no feedback bundle')
+                    time.sleep(.005)
+                packet,sender=next((p,a) for p,a in collector.packets if p.startswith(b'#bundle\x00'))
+                token,port=decode_packet(packet)[0][2][:2];target=(sender[0],int(port))
+                def wire(tags, values):
+                    data=pack_string('/scene/replay/result')+pack_string(','+tags)
+                    for tag,value in zip(tags,values):
+                        data += pack_string(value) if tag=='s' else struct.pack('>i' if tag=='i' else '>f',value)
+                    return data
+                corpus=[('foreign-token',wire('ssis',['F'*32,'applied',42,'bad'])),
+                    ('invalid-status',wire('ssis',[token,'unknown',42,'bad'])),
+                    ('negative-applied-frame',wire('ssis',[token,'applied',-1,'bad'])),
+                    ('float-frame',wire('ssfs',[token,'applied',42.0,'bad'])),
+                    ('oversize-detail',wire('ssis',[token,'applied',42,'x'*513])),
+                    ('missing-detail',wire('ssi',[token,'applied',42])),
+                    ('extra-field',wire('ssiss',[token,'applied',42,'bad','extra'])),
+                    ('integer-token',wire('isis',[7,'applied',42,'bad'])),
+                    ('integer-detail',wire('ssii',[token,'applied',42,7]))]
+                with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as reply:
+                    reply.bind(('127.0.0.1',0))
+                    for label,data in corpus:
+                        reply.sendto(data,target);sent.append({'label':label,'destination':target,'source':reply.getsockname(),'packet_hex':data.hex()})
+                    with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as foreign:
+                        foreign_ip=subprocess.check_output(['ipconfig','getifaddr','en0'],text=True).strip()
+                        if not foreign_ip or foreign_ip=='127.0.0.1':raise AssertionError('distinct existing local interface required for foreign-IP corpus')
+                        foreign.bind((foreign_ip,0));data=reply_packet(token,'applied',42,'foreign-ip');foreign.sendto(data,target)
+                        sent.append({'label':'foreign-source-ip','source':foreign.getsockname(),'destination':target,'packet_hex':data.hex()})
+                    with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as wrong:
+                        wrong.bind(('127.0.0.1',0));wrong_target=('127.0.0.1',wrong.getsockname()[1]);data=reply_packet(token,'applied',42,'wrong-local-port');reply.sendto(data,wrong_target)
+                        sent.append({'label':'wrong-local-port','destination':wrong_target,'packet_hex':data.hex()})
+                    reply.sendto(pack_string('/unrelated')+pack_string(','),target)
+                    time.sleep(.2)
+                    valid=reply_packet(token,status,expected_frame,'valid')
+                    if status!='unknown':
+                        reply.sendto(valid,target);reply.sendto(valid,target)
+                        sent.append({'label':'valid-and-duplicate','packet_hex':valid.hex(),'source':reply.getsockname()})
+                        time.sleep(.15)
+                    else:
+                        # A valid success only after default timeout must remain ignored.
+                        time.sleep(14.95);valid=reply_packet(token,'applied',42,'too-late')
+                    reply.sendto(valid,target);reply.sendto(pack_string('/unrelated')+pack_string(','),target)
+                    sent.append({'label':'late','packet_hex':valid.hex()})
+            except BaseException as error:errors.append(repr(error))
+            finally:stop.set()
+        thread=threading.Thread(target=inject,daemon=True);thread.start()
+        try:
+            receipt=run_sclang(case/'owned',script,timeout=22)
+        except BaseException as error:
+            thread.join(2)
+            (case/'wire.json').write_text(json.dumps({'sent':sent,'injection_errors':errors},indent=2)+'\n')
+            if errors: raise AssertionError(errors) from error
+            raise
+        thread.join(2)
+        if errors:raise AssertionError(errors)
+        if thread.is_alive():raise AssertionError('observer injector still active')
+        time.sleep(.1)
+    bundles=[p for p,_ in collector.packets if p.startswith(b'#bundle\x00')]
+    ordinary=[decode_packet(p)[0][:3] for p,_ in collector.packets if not p.startswith(b'#bundle\x00')]
+    if len(bundles)!=1 or ordinary!=[('/after-observer',',i',[7])]:raise AssertionError('automatic resend or unusable client')
+    if f'FEEDBACK_OBSERVER_OK {status}' not in receipt['output']:raise AssertionError(receipt['output'])
+    (case/'wire.json').write_text(json.dumps({'sent':sent,'outbound_packet_hex':[p.hex() for p,_ in collector.packets]},indent=2)+'\n')
+    return {'status':status,'injected':len(sent),'bundle_count':len(bundles),'receipt':str(case/'owned/receipt.json'),'wire':str(case/'wire.json')}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -390,6 +615,8 @@ def main() -> int:
         receipt_root.mkdir(parents=True)
     results = {
         "legacy": legacy_differential(receipt_root),
+        "feedback": feedback_case(receipt_root),
+        "feedback_observer": [feedback_observer_case(receipt_root, status) for status in ("applied", "failed", "unknown")],
         "replay": [replay_case(receipt_root, status) for status in ("applied", "failed", "unknown")]
             + [replay_case(receipt_root, "unknown", default_timeout=True)],
         "sources": source_hashes(),
